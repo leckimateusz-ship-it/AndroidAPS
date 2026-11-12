@@ -1,0 +1,92 @@
+# Experimental, unsigned AAPSClient build for a physical iPhone.
+# This is NOT a verified/approved medical application release.
+name: AAPSClient iOS unsigned IPA
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned-ios:
+    name: Build unsigned AAPSClient IPA
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Read repository JDK version
+        shell: bash
+        run: echo "JAVA_VERSION=$(jq -r '.default' .github/jdk-map.json)" >> "$GITHUB_ENV"
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: Cache Kotlin/Native
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: konan-${{ runner.os }}-
+
+      - name: Show build environment
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          java -version
+
+      - name: Generate AAPS version configuration
+        run: ./gradlew --console=plain --no-daemon :ios:shell:generateIosVersionXcconfig
+
+      - name: Build AAPSClient for real iPhone without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/app/AAPSClient.xcodeproj \
+            -scheme AAPSClient \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/aaps-derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee xcodebuild.log
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/aaps-derived/Build/Products/Release-iphoneos/AAPSClient.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::AAPSClient.app not found at $APP"
+            find "$RUNNER_TEMP/aaps-derived/Build/Products" -maxdepth 4 -name '*.app' -print || true
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/unsigned-ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/unsigned-ipa/Payload/"
+          (cd "$RUNNER_TEMP/unsigned-ipa" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/AAPSClient-unsigned.ipa" Payload)
+          ls -lh AAPSClient-unsigned.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: AAPSClient-unsigned-ipa
+          path: AAPSClient-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AAPSClient-build-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
